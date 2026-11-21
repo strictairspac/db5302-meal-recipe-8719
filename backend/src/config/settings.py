@@ -7,6 +7,7 @@ IS_MYSQL = DRIVER.startswith('mysql')
 URL = URL.create(DRIVER, username=os.getenv('DB_USER', 'app'),
                  password=os.getenv('DB_PASSWORD', 'local-db-demo'),
                  host=os.getenv('DB_HOST', 'db'), database=os.getenv('DB_NAME', 'workflow'),
+                 port=int(os.getenv('DB_PORT')) if os.getenv('DB_PORT') else None,
                  query={'charset': 'utf8mb4'} if IS_MYSQL else {})
 engine = create_engine(URL, pool_pre_ping=True)
 cache = Redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0'), socket_timeout=3)

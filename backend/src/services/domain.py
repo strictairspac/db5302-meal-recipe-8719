@@ -1,5 +1,6 @@
 """Expand menu recipes and produce a purchase proposal with path evidence."""
 
+import copy
 import json
 import re
 from collections import Counter
@@ -227,6 +228,10 @@ def _purchase_row(node, row):
 
 
 def solve(payload, engine):
+    return solve_detail(payload, engine)["report"]
+
+
+def solve_detail(payload, engine):
     batch, menu, nodes, edges, recipe_count = _prepare(payload)
     with engine.begin() as conn:
         rows = conn.execute(EXPAND_RECIPES, {
@@ -253,6 +258,7 @@ def solve(payload, engine):
         for line_id, item in enumerate(menu, start=1)
     ]
     purchase, evidence, issues = [], [], []
+    counted_edges = set()
     for row in rows:
         kind = row["kind"]
         if kind == "budget":
@@ -267,11 +273,16 @@ def solve(payload, engine):
         if kind == "material":
             factors = [str(item["servings"])]
             factors.extend(ratios[edge] for edge in zip(path_ids, path_ids[1:]))
+            counted = row["line_id"] not in blocked
+            if counted:
+                counted_edges.update(
+                    (by_id[parent]["code"], by_id[child]["code"])
+                    for parent, child in zip(path_ids, path_ids[1:]))
             evidence.append({
                 "菜单行": item["line"], "原料编号": node["code"], "单位": node["unit"],
                 "配方路径": " → ".join(path), "路径算式": " × ".join(factors),
                 "路径用量": _quantity(row["quantity"]),
-                "采购口径": "冻结，未计入" if row["line_id"] in blocked else "已计入",
+                "采购口径": "已计入" if counted else "冻结，未计入",
             })
         else:
             issue, action = ISSUES[kind]
@@ -287,7 +298,7 @@ def solve(payload, engine):
     purchase_summary = (
         f"已核菜品有 {to_order} 种原料需要补货。" if approved else "请修正配方后重算采购量。"
     )
-    return {
+    report = {
         "summary": f"{batch}共 {len(menu)} 条菜单行，核准 {approved} 条，冻结 {len(blocked)} 条。"
                    f"{purchase_summary}",
         "metrics": {
@@ -303,3 +314,60 @@ def solve(payload, engine):
             {"title": "原料用量路径", "rows": evidence},
         ],
     }
+    return {"report": report, "purchase": purchase, "counted_edges": counted_edges}
+
+
+def code_text(value, label):
+    return _code(value, label)
+
+
+def ratio_text(value, label="投料比例"):
+    return _quantity(_decimal(value, label, 100))
+
+
+def apply_errata(payload, corrections):
+    """Return a copy of the case payload with each errata's ratio applied in order."""
+    if not corrections:
+        return payload
+    updated = copy.deepcopy(payload)
+    edges = {(row.get("parent"), row.get("component")): row
+             for row in updated.get("components", []) if isinstance(row, dict)}
+    for correction in corrections:
+        edge = edges.get((correction["parent"], correction["component"]))
+        if edge is not None:
+            edge["qty"] = correction["new_qty"]
+    return updated
+
+
+def compensation(payload, parent, component, old_qty, new_qty, engine):
+    """Package-count delta of one ratio change on one issued order.
+
+    The payload keeps the order's own servings, stock and pack sizes; only the
+    corrected relationship varies. Returns None when the order never walked the
+    relationship on a counted (non-frozen) path, otherwise the per-ingredient
+    package differences between the old and the new ratio.
+    """
+    before = solve_detail(apply_errata(payload, [
+        {"parent": parent, "component": component, "new_qty": old_qty}]), engine)
+    if (parent, component) not in before["counted_edges"]:
+        return None
+    after = solve_detail(apply_errata(payload, [
+        {"parent": parent, "component": component, "new_qty": new_qty}]), engine)
+    previous = {row["原料编号"]: row for row in before["purchase"]}
+    rows = []
+    for changed in after["purchase"]:
+        code = changed["原料编号"]
+        old_packages = int(previous[code]["建议包数"])
+        new_packages = int(changed["建议包数"])
+        if old_packages == new_packages:
+            continue
+        quantity_delta = Decimal(changed["建议采购量"]) - Decimal(previous[code]["建议采购量"])
+        rows.append({
+            "原料编号": code, "原料": changed["原料"], "单位": changed["单位"],
+            "每包数量": changed["每包数量"],
+            "原建议包数": str(old_packages), "新建议包数": str(new_packages),
+            "包数差": f"{new_packages - old_packages:+d}",
+            "采购量差": f"+{_quantity(quantity_delta)}" if quantity_delta > 0
+                       else _quantity(quantity_delta),
+        })
+    return {"rows": rows}

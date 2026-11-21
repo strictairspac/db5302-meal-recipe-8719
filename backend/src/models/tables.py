@@ -1,5 +1,5 @@
 from sqlalchemy import (JSON, Column, ForeignKey, Integer, MetaData, String,
-                        Table, Text)
+                        Table, Text, UniqueConstraint)
 
 schema = MetaData()
 users = Table('accounts', schema,
@@ -38,3 +38,21 @@ audit = Table('audit_events', schema,
     Column('action', String(32), nullable=False),
     Column('reference', String(50), nullable=False),
     Column('created_at', String(32), nullable=False))
+errata = Table('recipe_errata', schema,
+    Column('id', Integer, primary_key=True),
+    Column('case_id', ForeignKey('business_cases.id'), nullable=False, index=True),
+    Column('parent', String(32), nullable=False),
+    Column('component', String(32), nullable=False),
+    Column('old_qty', String(16), nullable=False),
+    Column('new_qty', String(16), nullable=False),
+    Column('note', String(200), nullable=False),
+    Column('actor', String(40), nullable=False),
+    Column('created_at', String(32), nullable=False))
+compensations = Table('purchase_compensations', schema,
+    Column('id', Integer, primary_key=True),
+    Column('errata_id', ForeignKey('recipe_errata.id'), nullable=False, index=True),
+    Column('run_id', ForeignKey('business_runs.id'), nullable=False),
+    Column('detail', JSON, nullable=False),
+    Column('actor', String(40), nullable=False),
+    Column('created_at', String(32), nullable=False),
+    UniqueConstraint('errata_id', 'run_id', name='uq_compensation_once'))
